@@ -9,21 +9,13 @@ from torch import nn
 from torch import optim
 import torch.backends.cudnn as cudnn
 from torch.utils import data as data_utils
+from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 
 from glob import glob
 
 import os, random, cv2, argparse
 from hparams import hparams, get_image_list
-
-parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
-
-parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True)
-
-parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
-parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
-
-args = parser.parse_args()
 
 
 global_step = 0
@@ -35,8 +27,8 @@ syncnet_T = 5
 syncnet_mel_step_size = 16
 
 class Dataset(object):
-    def __init__(self, split):
-        self.all_videos = get_image_list(args.data_root, split)
+    def __init__(self, data_root, split):
+        self.all_videos = get_image_list(data_root, split)
 
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
@@ -140,11 +132,15 @@ def cosine_loss(a, v, y):
 def train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
 
+    writer = SummaryWriter(log_dir=checkpoint_dir)
+
     global global_step, global_epoch
     resumed_step = global_step
     
     while global_epoch < nepochs:
         running_loss = 0.
+        epoch_loss = 0.
+        epoch_steps = 0
         prog_bar = tqdm(enumerate(train_data_loader))
         for step, (x, mel, y) in prog_bar:
             model.train()
@@ -163,8 +159,10 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             optimizer.step()
 
             global_step += 1
+            epoch_steps += 1
             cur_session_steps = global_step - resumed_step
             running_loss += loss.item()
+            epoch_loss += loss.item()
 
             if global_step == 1 or global_step % checkpoint_interval == 0:
                 save_checkpoint(
@@ -172,19 +170,20 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
 
             if global_step % hparams.syncnet_eval_interval == 0:
                 with torch.no_grad():
-                    eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
+                    eval_model(test_data_loader, global_step, device, model, checkpoint_dir, writer)
 
-            prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
+            prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)), refresh=True)
 
+        writer.add_scalar('training_loss_epoch', epoch_loss / epoch_steps, global_epoch)
         global_epoch += 1
 
-def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
-    eval_steps = 1400
+def eval_model(test_data_loader, global_step, device, model, checkpoint_dir, writer):
+    eval_steps = 100 # 1400
     print('Evaluating for {} steps'.format(eval_steps))
     losses = []
     while 1:
         for step, (x, mel, y) in enumerate(test_data_loader):
-
+            print('test one step', x.shape, mel.shape, y.shape)
             model.eval()
 
             # Transform data to CUDA device
@@ -197,10 +196,11 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
 
             loss = cosine_loss(a, v, y)
             losses.append(loss.item())
-
+            print('test loss: {}'.format(loss.item()))
             if step > eval_steps: break
 
         averaged_loss = sum(losses) / len(losses)
+        writer.add_scalar('test_loss', averaged_loss, global_step)
         print(averaged_loss)
 
         return
@@ -244,14 +244,23 @@ def load_checkpoint(path, model, optimizer, reset_optimizer=False):
     return model
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
+
+    parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True)
+
+    parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
+    parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
+
+    args = parser.parse_args()
+
     checkpoint_dir = args.checkpoint_dir
     checkpoint_path = args.checkpoint_path
 
     if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
 
     # Dataset and Dataloader setup
-    train_dataset = Dataset('train')
-    test_dataset = Dataset('val')
+    train_dataset = Dataset(args.data_root, 'train')
+    test_dataset = Dataset(args.data_root, 'val')
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=True,
@@ -259,7 +268,7 @@ if __name__ == "__main__":
 
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.syncnet_batch_size,
-        num_workers=8)
+        num_workers=0)
 
     device = torch.device("cuda" if use_cuda else "cpu")
 

@@ -11,6 +11,8 @@ from torch.nn import functional as F
 from torch import optim
 import torch.backends.cudnn as cudnn
 from torch.utils import data as data_utils
+from torch.utils.tensorboard import SummaryWriter
+
 import numpy as np
 
 from glob import glob
@@ -204,6 +206,17 @@ def train(device, model, disc, train_data_loader, test_data_loader, optimizer, d
     global global_step, global_epoch
     resumed_step = global_step
 
+    writer = SummaryWriter(log_dir=checkpoint_dir)
+
+    epoch_loss = {
+        'sync_loss': 0.,
+        'l1_loss': 0.,
+        'perceptual_loss': 0.,
+
+        'disc_real_loss': 0.,
+        'disc_fake_loss': 0.,
+    }
+    epoch_step = 0
     while global_epoch < nepochs:
         print('Starting Epoch: {}'.format(global_epoch))
         running_sync_loss, running_l1_loss, disc_loss, running_perceptual_loss = 0., 0., 0., 0.
@@ -295,10 +308,34 @@ def train(device, model, disc, train_data_loader, test_data_loader, optimizer, d
                                                                                         running_disc_fake_loss / (step + 1),
                                                                                         running_disc_real_loss / (step + 1)))
 
+            epoch_step += 1
+            if hparams.syncnet_wt > 0.:
+                epoch_loss['sync_loss'] += sync_loss.item()
+            else:
+                epoch_loss['sync_loss'] += 0.
+
+            epoch_loss['l1_loss'] += l1loss.item()
+
+            if hparams.disc_wt > 0.:
+                epoch_loss['perceptual_loss'] += perceptual_loss.item()
+            else:
+                epoch_loss['perceptual_loss'] += 0.
+
+            epoch_loss['disc_real_loss'] += disc_real_loss.item()
+            epoch_loss['disc_fake_loss'] += disc_fake_loss.item()
+
         global_epoch += 1
 
+        writer.add_scalar('Train/L1_loss', epoch_loss['l1_loss'] / epoch_step, global_epoch)
+        writer.add_scalar('Train/Sync_loss', epoch_loss['sync_loss'] / epoch_step, global_epoch)
+        writer.add_scalar('Train/Perceptual_loss', epoch_loss['perceptual_loss'] / epoch_step, global_epoch)
+
+        writer.add_scalar('Train/Disc_real_loss', epoch_loss['disc_real_loss'] / epoch_step, global_epoch)
+        writer.add_scalar('Train/Disc_fake_loss', epoch_loss['disc_fake_loss'] / epoch_step, global_epoch)
+
+
 def eval_model(test_data_loader, global_step, device, model, disc):
-    eval_steps = 300
+    eval_steps = 100
     print('Evaluating for {} steps'.format(eval_steps))
     running_sync_loss, running_l1_loss, running_disc_real_loss, running_disc_fake_loss, running_perceptual_loss = [], [], [], [], []
     while 1:

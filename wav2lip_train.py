@@ -10,6 +10,7 @@ from torch import nn
 from torch import optim
 import torch.backends.cudnn as cudnn
 from torch.utils import data as data_utils
+from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 
 from glob import glob
@@ -202,6 +203,8 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
 
     global global_step, global_epoch
     resumed_step = global_step
+
+    writer = SummaryWriter(log_dir=checkpoint_dir)
  
     while global_epoch < nepochs:
         print('Starting Epoch: {}'.format(global_epoch))
@@ -246,9 +249,9 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                 save_checkpoint(
                     model, optimizer, global_step, checkpoint_dir, global_epoch)
 
-            if global_step == 1 or global_step % hparams.eval_interval == 0:
+            if global_step == 1 or global_step % hparams.eval_interval == 1:
                 with torch.no_grad():
-                    average_sync_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
+                    average_sync_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir, writer)
 
                     if average_sync_loss < .75:
                         hparams.set_hparam('syncnet_wt', 0.01) # without image GAN a lesser weight is sufficient
@@ -256,40 +259,45 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             prog_bar.set_description('L1: {}, Sync Loss: {}'.format(running_l1_loss / (step + 1),
                                                                     running_sync_loss / (step + 1)))
 
+            writer.add_scalar('training_l1_loss', running_l1_loss / (step + 1), global_step)
+            writer.add_scalar('training_sync_loss', running_sync_loss / (step + 1), global_step)
         global_epoch += 1
         
 
-def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
-    eval_steps = 700
+def eval_model(test_data_loader, global_step, device, model, checkpoint_dir, writer):
+    eval_steps = 100
     print('Evaluating for {} steps'.format(eval_steps))
     sync_losses, recon_losses = [], []
     step = 0
-    while 1:
-        for x, indiv_mels, mel, gt in test_data_loader:
-            step += 1
-            model.eval()
+    # while 1:
+    for x, indiv_mels, mel, gt in test_data_loader:
+        step += 1
+        model.eval()
 
-            # Move data to CUDA device
-            x = x.to(device)
-            gt = gt.to(device)
-            indiv_mels = indiv_mels.to(device)
-            mel = mel.to(device)
+        # Move data to CUDA device
+        x = x.to(device)
+        gt = gt.to(device)
+        indiv_mels = indiv_mels.to(device)
+        mel = mel.to(device)
 
-            g = model(indiv_mels, x)
+        g = model(indiv_mels, x)
 
-            sync_loss = get_sync_loss(mel, g)
-            l1loss = recon_loss(g, gt)
+        sync_loss = get_sync_loss(mel, g)
+        l1loss = recon_loss(g, gt)
 
-            sync_losses.append(sync_loss.item())
-            recon_losses.append(l1loss.item())
+        sync_losses.append(sync_loss.item())
+        recon_losses.append(l1loss.item())
 
-            if step > eval_steps: 
-                averaged_sync_loss = sum(sync_losses) / len(sync_losses)
-                averaged_recon_loss = sum(recon_losses) / len(recon_losses)
+        if step > eval_steps:
+            break
+    averaged_sync_loss = sum(sync_losses) / len(sync_losses)
+    averaged_recon_loss = sum(recon_losses) / len(recon_losses)
 
-                print('L1: {}, Sync loss: {}'.format(averaged_recon_loss, averaged_sync_loss))
+    print('L1: {}, Sync loss: {}'.format(averaged_recon_loss, averaged_sync_loss))
+    writer.add_scalar('eval_l1_loss', averaged_recon_loss, global_step)
+    writer.add_scalar('eval_sync_loss', averaged_sync_loss, global_step)
 
-                return averaged_sync_loss
+    return averaged_sync_loss
 
 def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch):
 
